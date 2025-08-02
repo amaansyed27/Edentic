@@ -206,50 +206,34 @@ def generate_missing_content(collection, genai_client, content_plan, media_asset
         status_text.text(f"🎨 Generating {content_type}: {description[:50]}...")
         
         try:
-            if content_type == 'title_image':
-                # Generate title card using Gemini
-                generated_asset = generate_title_image_with_gemini(genai_client, description)
-                if generated_asset:
-                    # Upload generated image to VideoDB
-                    uploaded_asset = collection.upload(file_path=generated_asset['file_path'])
-                    generated_assets.append({
-                        'asset': uploaded_asset,
-                        'name': f"generated_title_{i}.png",
-                        'asset_id': uploaded_asset.id,
-                        'media_type': 'image',
-                        'description': description,
-                        'generated': True,
-                        'generation_type': 'title_image'
-                    })
-                
-            elif content_type == 'background_music':
-                # Generate music using VideoDB
-                music_asset = collection.generate_music(
-                    prompt=description,
-                    duration=request.get('duration', 45)
-                )
-                generated_assets.append({
-                    'asset': music_asset,
-                    'name': f"generated_music_{i}.mp3",
-                    'asset_id': music_asset.id,
-                    'media_type': 'audio',
-                    'description': description,
-                    'generated': True,
-                    'generation_type': 'background_music'
-                })
-                
-            elif content_type == 'voiceover':
+            # Focus only on voiceover generation - no title images or background music
+            if content_type == 'voiceover':
                 # Generate voiceover using VideoDB
                 voice_asset = collection.generate_voice(
                     text=request.get('script', description),
                     voice_name=request.get('voice_style', 'Default')
                 )
+                
+                # Get duration for the generated voice asset
+                try:
+                    # Try to get duration from the asset
+                    voice_duration = getattr(voice_asset, 'duration', 0)
+                    if voice_duration <= 0:
+                        # Fallback: estimate duration based on text length (rough: ~150 words per minute)
+                        text_length = len(request.get('script', description).split())
+                        voice_duration = max(10, text_length * 0.4)  # ~0.4 seconds per word
+                        st.info(f"🔍 Estimated voiceover duration: {voice_duration:.1f}s (based on {text_length} words)")
+                except Exception as dur_error:
+                    voice_duration = 30  # Safe fallback
+                    st.warning(f"⚠️ Could not get voice duration, using fallback: {voice_duration}s")
+                
                 generated_assets.append({
                     'asset': voice_asset,
                     'name': f"generated_voiceover_{i}.mp3",
                     'asset_id': voice_asset.id,
                     'media_type': 'audio',
                     'description': description,
+                    'duration': voice_duration,  # CRITICAL: Add duration to asset info
                     'generated': True,
                     'generation_type': 'voiceover'
                 })
@@ -269,6 +253,11 @@ def generate_missing_content(collection, genai_client, content_plan, media_asset
                     'generated': True,
                     'generation_type': 'video_clip'
                 })
+                
+            else:
+                # Skip other content types (title_image, background_music, etc.)
+                st.info(f"⚠️ Skipping {content_type} generation (disabled for focus on video editing)")
+                continue
                 
         except Exception as e:
             st.warning(f"⚠️ Failed to generate {content_type}: {str(e)}")
@@ -323,7 +312,7 @@ def create_comprehensive_content_plan(genai_client, media_assets, project_descri
     
     combined_media = "\n---\n".join(media_summary)
     
-    prompt = f"""You are an expert multimedia content creator and video editor. Based on the project description and available assets, create a comprehensive content plan.
+    prompt = f"""You are an expert multimedia content creator and video editor. Based on the project description and available assets, create a comprehensive content plan focusing on professional video editing and sequencing.
 
 PROJECT DESCRIPTION:
 {project_description}
@@ -333,19 +322,19 @@ TARGET DURATION: {target_duration} seconds
 AVAILABLE ASSETS:
 {combined_media}
 
-Create a detailed content plan that includes:
-1. What content needs to be generated (title cards, music, voiceovers, additional video clips)
-2. How to organize and edit the existing assets
-3. Timeline structure with optimal pacing
-4. Professional narrative flow
+Create a detailed content plan that focuses on video editing and sequencing. DO NOT generate background music or title images. Focus on:
+1. Professional video editing: cropping, clipping, splitting, and sequencing the available video clips
+2. Voiceover generation (if needed) to narrate the video content
+3. Timeline structure with optimal pacing and transitions
+4. Professional narrative flow using the available video assets
 
 Return a JSON response with this structure:
 {{
-    "project_analysis": "Brief analysis of the project goals and style",
+    "project_analysis": "Brief analysis of the project goals and video editing approach",
     "target_audience": "Who this content is for",
     "content_to_generate": [
         {{
-            "type": "title_image|background_music|voiceover|video_clip",
+            "type": "voiceover",
             "description": "Detailed description for AI generation",
             "duration": 5,
             "placement": "beginning|middle|end",
@@ -904,37 +893,13 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
         video_assets.sort(key=lambda x: x['name'])  # Sort by filename to get correct order
         
         if len(video_assets) >= 2:  # Multi-clip sequencing
-            st.info(f"🎬 Sequencing {len(video_assets)} clips for tutorial...")
+            st.info(f"🎬 Professional video editing: Sequencing {len(video_assets)} clips for tutorial...")
             
-            # First, try to add title card if available (skip if causes issues)
-            title_card_added = False
-            for asset in all_assets:
-                if asset['media_type'] == 'image' and asset.get('generation_type') == 'title_image':
-                    title_duration = min(3, adjusted_duration * 0.1)  # 3s max, or 10% of total
-                    
-                    st.info(f"🖼️ Adding title card: {title_duration:.1f}s")
-                    
-                    try:
-                        # Try using add_overlay for images instead of add_inline
-                        title_asset = ImageAsset(
-                            asset_id=asset['asset_id'],
-                            duration=title_duration
-                        )
-                        
-                        # For now, skip title card to avoid timeline errors - focus on video sequencing
-                        st.warning("⚠️ Skipping title card for now - focusing on video sequencing")
-                        # timeline.add_inline(title_asset)  # Commented out to avoid errors
-                        # timeline_duration += title_duration
-                        # title_card_added = True
-                        # video_added = True
-                        break
-                        
-                    except Exception as title_error:
-                        st.warning(f"⚠️ Could not add title card: {str(title_error)}")
-                        break
+            # Skip title card - focus on video editing
+            st.info("� Focusing on professional video editing (no title card)")
             
-            # Calculate remaining duration for video clips
-            remaining_duration = adjusted_duration - timeline_duration
+            # Calculate full duration for video clips
+            remaining_duration = adjusted_duration
             
             # INTELLIGENT DURATION ALLOCATION based on AI content analysis
             if timeline_structure:
@@ -968,29 +933,47 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                             # Allocate duration proportionally
                             clip_duration = (content_weight / total_weight) * remaining_duration if total_weight > 0 else remaining_duration / len(video_segments)
                             
-                            # Ensure within reasonable bounds
+                            # Professional video editing: Ensure within reasonable bounds
                             source_duration = video_asset.get('duration', 10)
                             if source_duration <= 0:
                                 source_duration = 10
                             
-                            clip_duration = min(clip_duration, source_duration * 0.95)
+                            # Smart clipping: Use best part of the video (not always from start)
+                            max_usable_duration = source_duration * 0.90  # Use up to 90% of source
+                            clip_duration = min(clip_duration, max_usable_duration)
                             clip_duration = max(clip_duration, 3)  # Minimum 3s per clip
-                            clip_duration = min(clip_duration, 20) # Maximum 20s per clip
+                            clip_duration = min(clip_duration, 20)  # Maximum 20s per clip
                             
-                            st.info(f"🎯 {video_asset['name']}: {clip_duration:.1f}s (importance: {importance}, recommended: {recommended_duration}s)")
+                            # Smart start time selection (avoid very beginning/end)
+                            if source_duration > clip_duration + 2:
+                                # Leave 1s buffer at start and end for better quality
+                                max_start_time = source_duration - clip_duration - 1
+                                start_time = min(1, max_start_time * 0.1)  # Start slightly into the video
+                            else:
+                                start_time = 0
+                            
+                            st.info(f"🎯 {video_asset['name']}: {clip_duration:.1f}s (from {start_time:.1f}s, importance: {importance})")
                         else:
-                            # Fallback to equal distribution
+                            # Fallback to equal distribution with smart editing
                             clip_duration = remaining_duration / len(video_assets[:3])
-                            clip_duration = min(clip_duration, video_asset.get('duration', 10) * 0.95)
-                            st.info(f"📹 {video_asset['name']}: {clip_duration:.1f}s (fallback allocation)")
+                            source_duration = video_asset.get('duration', 10)
+                            clip_duration = min(clip_duration, source_duration * 0.90)
+                            
+                            # Smart start time for fallback
+                            if source_duration > clip_duration + 2:
+                                start_time = min(1, source_duration * 0.1)
+                            else:
+                                start_time = 0
+                                
+                            st.info(f"📹 {video_asset['name']}: {clip_duration:.1f}s (from {start_time:.1f}s, professional edit)")
                         
-                        # Create video asset for this clip with error handling
+                        # Create professionally edited video clip
                         if clip_duration > 0:
                             try:
                                 video_clip = VideoAsset(
                                     asset_id=video_asset['asset_id'],
-                                    start=0,
-                                    end=clip_duration
+                                    start=start_time,
+                                    end=start_time + clip_duration
                                 )
                                 
                                 # Add to timeline
@@ -1007,29 +990,38 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                     video_added = False  # Force fallback to equal duration
                         
             if not video_added:  # Fallback if AI analysis failed
-                # Fallback to equal duration if no AI analysis available
-                st.info("⚖️ Using equal duration allocation (no AI analysis available)...")
+                # Professional video editing with equal duration allocation
+                st.info("⚖️ Using professional video editing with optimized durations...")
                 clips_to_use = min(len(video_assets), 3)
                 duration_per_clip = remaining_duration / clips_to_use if clips_to_use > 0 else 0
                 
                 for i, video_asset in enumerate(video_assets[:clips_to_use]):
-                    # Calculate clip duration
+                    # Calculate professional clip duration
                     source_duration = video_asset.get('duration', 10)
                     if source_duration <= 0:
                         source_duration = 10
-                        
-                    clip_duration = min(duration_per_clip, source_duration * 0.95)
-                    if clip_duration <= 0:
-                        clip_duration = min(duration_per_clip, 8)  # Max 8s per clip fallback
                     
-                    st.info(f"📹 Adding {video_asset['name']}: {clip_duration:.1f}s")
+                    # Smart duration allocation
+                    max_usable_duration = source_duration * 0.90  # Use up to 90% of source
+                    clip_duration = min(duration_per_clip, max_usable_duration)
+                    clip_duration = max(clip_duration, 3)  # Minimum 3s per clip
+                    clip_duration = min(clip_duration, 15)  # Maximum 15s per clip for better pacing
                     
-                    # Create video asset for this clip with error handling
+                    # Professional start time selection (avoid start/end)
+                    if source_duration > clip_duration + 2:
+                        # Start slightly into the video for better content
+                        start_time = min(1, source_duration * 0.1)
+                    else:
+                        start_time = 0
+                    
+                    st.info(f"📹 Professional edit: {video_asset['name']} ({clip_duration:.1f}s from {start_time:.1f}s)")
+                    
+                    # Create professionally edited video clip
                     try:
                         video_clip = VideoAsset(
                             asset_id=video_asset['asset_id'],
-                            start=0,
-                            end=clip_duration
+                            start=start_time,
+                            end=start_time + clip_duration
                         )
                         
                         # Add to timeline
@@ -1170,15 +1162,40 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
         for asset in all_assets:
             if asset['media_type'] == 'audio' and asset.get('generation_type') == 'voiceover':
                 try:
-                    # CRITICAL: Use timeline_duration instead of adjusted_duration to match video length
+                    # CRITICAL: Use timeline_duration to match exact video length
                     actual_video_duration = timeline_duration if timeline_duration > 0 else adjusted_duration
-                    audio_duration = min(actual_video_duration, asset.get('duration', actual_video_duration))
+                    asset_audio_duration = asset.get('duration', 0)
                     
-                    # Ensure audio doesn't exceed video length
-                    if audio_duration > actual_video_duration:
-                        audio_duration = actual_video_duration
+                    # Debug information
+                    st.info(f"🔍 Debug - Video duration: {actual_video_duration:.1f}s, Audio asset duration: {asset_audio_duration:.1f}s")
                     
-                    st.info(f"🎤 Syncing voiceover: {audio_duration:.1f}s audio to match {actual_video_duration:.1f}s video")
+                    # CRITICAL FIX: If audio asset has no duration (0.0s), we can't use it properly
+                    if asset_audio_duration <= 0:
+                        st.warning(f"⚠️ Audio asset has invalid duration ({asset_audio_duration}s). Skipping voiceover to prevent timeline errors.")
+                        st.info(f"💡 This usually means the audio generation failed or is still processing.")
+                        continue
+                    
+                    # Use the shorter of the two durations to prevent overrun, with safety buffer
+                    safety_buffer = 0.5  # 0.5 second buffer to prevent exact duration issues
+                    max_safe_audio_duration = asset_audio_duration - safety_buffer
+                    
+                    if max_safe_audio_duration <= 0:
+                        st.warning(f"⚠️ Audio too short after buffer ({max_safe_audio_duration:.1f}s). Skipping voiceover.")
+                        continue
+                    
+                    # Choose the minimum duration with safety buffer
+                    audio_duration = min(actual_video_duration, max_safe_audio_duration)
+                    
+                    # Additional safety checks
+                    if audio_duration <= 0:
+                        st.warning(f"⚠️ Calculated audio duration is invalid ({audio_duration:.1f}s). Skipping voiceover.")
+                        continue
+                    
+                    # Final bounds check
+                    if audio_duration > asset_audio_duration:
+                        audio_duration = asset_audio_duration * 0.95  # Use 95% of available audio
+                    
+                    st.info(f"🎤 Syncing voiceover: {audio_duration:.1f}s audio (with safety buffer) to match {actual_video_duration:.1f}s video")
                     
                     audio_asset = AudioAsset(
                         asset_id=asset['asset_id'],
@@ -1190,18 +1207,28 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                     # Add voiceover starting at beginning
                     timeline.add_overlay(start=0, asset=audio_asset)
                     audio_overlays_added += 1
-                    st.info(f"✅ Added voiceover (0-{audio_duration:.1f}s)")
+                    st.info(f"✅ Added voiceover (0-{audio_duration:.1f}s) with safety buffer")
                     break  # Only add one voiceover to avoid conflicts
                     
                 except Exception as e:
                     st.warning(f"⚠️ Failed to add voiceover: {str(e)}")
                     continue
         
-        # Generate the final video stream - SIMPLIFIED APPROACH
-        if video_added:
+        # Generate the final video stream - COMPREHENSIVE FALLBACK SYSTEM
+        if video_added and timeline_duration > 0:
+            # STEP 1: Try timeline with audio overlays
             try:
                 st.info(f"✅ Timeline ready: {timeline_duration:.1f}s of video content")
-                st.info("🎬 Generating video stream (basic mode for reliability)...")
+                
+                # Validate timeline before generation
+                if timeline_duration <= 0:
+                    st.error("❌ Timeline duration is invalid")
+                    raise Exception("Invalid timeline duration")
+                
+                # Debug: Check timeline contents
+                st.info(f"🔍 Timeline validation - Duration: {timeline_duration:.1f}s, Audio overlays: {audio_overlays_added}")
+                
+                st.info("🎬 Generating video stream (with audio overlays)...")
                 
                 # Use BASIC stream generation first - more reliable
                 final_video_url = timeline.generate_stream()
@@ -1211,17 +1238,73 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                 
                 # Validate the generated URL
                 if final_video_url and len(final_video_url) > 10:
-                    st.info(f"� Video URL: {final_video_url[:50]}...")
+                    st.info(f"🔗 Video URL: {final_video_url[:50]}...")
                     return final_video_url
                 else:
                     st.error("❌ Generated video URL appears invalid")
-                    return None
+                    raise Exception("Invalid video URL generated")
                 
             except Exception as stream_error:
-                st.error(f"❌ Stream generation failed: {str(stream_error)}")
-                st.info("💡 The timeline might be invalid or assets unavailable")
+                st.error(f"❌ Stream generation with audio failed: {str(stream_error)}")
+                st.info("💡 Trying without audio overlays...")
                 
-                # ULTIMATE FALLBACK: Try to use video directly without timeline
+                # STEP 2: Try timeline without audio overlays (video-only)
+                try:
+                    st.info("🔄 Creating professional video-only timeline (no audio overlays)...")
+                    
+                    # Create new timeline without audio - focus on video editing
+                    video_only_timeline = Timeline(conn)
+                    video_only_duration = 0
+                    
+                    # Add videos only (no audio overlays, no title cards)
+                    video_assets = [asset for asset in media_assets if asset['media_type'] == 'video']
+                    video_assets.sort(key=lambda x: x['name'])  # Sort by filename
+                    
+                    st.info("📹 Focusing on professional video editing (no title cards)")
+                    
+                    # Professional video clip editing
+                    remaining_duration = adjusted_duration  # Use full duration for videos
+                    clips_to_use = min(len(video_assets), 3)
+                    duration_per_clip = remaining_duration / clips_to_use if clips_to_use > 0 else 0
+                    
+                    for i, video_asset in enumerate(video_assets[:clips_to_use]):
+                        source_duration = video_asset.get('duration', 10)
+                        
+                        # Professional editing: Smart duration and start time
+                        max_usable_duration = source_duration * 0.90
+                        clip_duration = min(duration_per_clip, max_usable_duration)
+                        clip_duration = max(clip_duration, 3)  # Minimum 3s
+                        
+                        # Smart start time (avoid very beginning)
+                        if source_duration > clip_duration + 2:
+                            start_time = min(1, source_duration * 0.1)
+                        else:
+                            start_time = 0
+                        
+                        video_clip = VideoAsset(
+                            asset_id=video_asset['asset_id'],
+                            start=start_time,
+                            end=start_time + clip_duration
+                        )
+                        video_only_timeline.add_inline(video_clip)
+                        video_only_duration += clip_duration
+                        st.info(f"✅ Professional edit: {video_asset['name']} ({clip_duration:.1f}s from {start_time:.1f}s)")
+                    
+                    # Generate professionally edited video-only stream
+                    st.info("🎬 Generating professionally edited video stream...")
+                    video_only_url = video_only_timeline.generate_stream()
+                    
+                    if video_only_url and len(video_only_url) > 10:
+                        st.success("✅ Professional video-only stream generated successfully!")
+                        st.info(f"📊 Final edited video: ~{video_only_duration:.1f}s duration with professional cuts")
+                        return video_only_url
+                    else:
+                        raise Exception("Professional video-only stream generation failed")
+                        
+                except Exception as video_only_error:
+                    st.error(f"❌ Video-only timeline failed: {str(video_only_error)}")
+                
+                # STEP 3: ULTIMATE FALLBACK - Direct video stream
                 st.info("🔄 Attempting direct video stream generation...")
                 try:
                     # Find first video asset and generate stream directly
@@ -1252,13 +1335,34 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                                 st.info(f"Method 2 failed: {str(e2)}")
                             
                             try:
-                                # Method 3: Just play the video as-is
-                                play_url = video_obj.play()
-                                if play_url:
-                                    st.success("✅ Video play URL generated (Method 3)!")
-                                    return play_url
+                                # Method 3: Create simple single-video timeline
+                                simple_timeline = Timeline(conn)
+                                video_duration = asset.get('duration', 30)
+                                clip_duration = min(target_duration, video_duration * 0.95)
+                                
+                                simple_video = VideoAsset(
+                                    asset_id=asset.get('asset_id'),
+                                    start=0,
+                                    end=clip_duration
+                                )
+                                simple_timeline.add_inline(simple_video)
+                                
+                                simple_url = simple_timeline.generate_stream()
+                                if simple_url and len(simple_url) > 10:
+                                    st.success("✅ Simple timeline generated (Method 3)!")
+                                    return simple_url
                             except Exception as e3:
                                 st.info(f"Method 3 failed: {str(e3)}")
+                            
+                            try:
+                                # Method 4: Just play the video as-is
+                                play_url = video_obj.play()
+                                if play_url:
+                                    st.success("✅ Video play URL generated (Method 4)!")
+                                    st.warning("⚠️ Using original video without editing")
+                                    return play_url
+                            except Exception as e4:
+                                st.info(f"Method 4 failed: {str(e4)}")
                     
                     st.error("❌ No suitable video assets found for direct streaming")
                     return None
