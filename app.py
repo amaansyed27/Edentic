@@ -208,6 +208,9 @@ def generate_missing_content(collection, genai_client, content_plan, media_asset
         try:
             # Focus only on voiceover generation - no title images or background music
             if content_type == 'voiceover':
+                # Notify user about cropped content voiceover
+                st.info("🎬 **Professional Editing**: Generating voiceover for cropped video segments (best portions of your videos)")
+                
                 # Generate voiceover using VideoDB
                 voice_asset = collection.generate_voice(
                     text=request.get('script', description),
@@ -223,6 +226,12 @@ def generate_missing_content(collection, genai_client, content_plan, media_asset
                         text_length = len(request.get('script', description).split())
                         voice_duration = max(10, text_length * 0.4)  # ~0.4 seconds per word
                         st.info(f"🔍 Estimated voiceover duration: {voice_duration:.1f}s (based on {text_length} words)")
+                    
+                    # Check if voiceover duration seems reasonable (basic check)
+                    if voice_duration < 20:  # If voiceover is less than 20 seconds
+                        st.warning(f"⚠️ Voiceover duration ({voice_duration:.1f}s) seems short for a tutorial video")
+                        st.info("💡 The voiceover may not cover the entire video. Consider generating a longer script.")
+                        
                 except Exception as dur_error:
                     voice_duration = 30  # Safe fallback
                     st.warning(f"⚠️ Could not get voice duration, using fallback: {voice_duration}s")
@@ -301,30 +310,50 @@ def generate_title_image_with_gemini(genai_client, description):
 def create_comprehensive_content_plan(genai_client, media_assets, project_description, target_duration):
     """Create a comprehensive content plan based on available assets and project description"""
     
-    # Gather all available media information
+    # Gather all available media information with cropping context
     media_summary = []
+    video_assets = [asset for asset in media_assets if asset['media_type'] == 'video']
+    
     for asset in media_assets:
         asset_info = f"Asset: {asset['name']} ({asset['media_type']})\n"
         asset_info += f"Description: {asset['description']}\n"
+        
+        # For video assets, explain the cropping that will be applied
+        if asset['media_type'] == 'video' and asset.get('duration', 0) > 0:
+            source_duration = asset.get('duration', 10)
+            # Calculate the actual cropped segment that will be used
+            max_usable_duration = source_duration * 0.90  # Use up to 90% of source
+            start_offset = min(1, source_duration * 0.1)  # Start slightly into the video
+            
+            asset_info += f"Original Duration: {source_duration:.1f}s\n"
+            asset_info += f"IMPORTANT - Cropped Segment: Will use {max_usable_duration:.1f}s starting from {start_offset:.1f}s (skipping beginning/end)\n"
+            asset_info += f"Actual Content Window: {start_offset:.1f}s to {start_offset + max_usable_duration:.1f}s of the original video\n"
+        
         if asset['transcript']:
-            asset_info += f"Content: {asset['transcript'][:200]}...\n"
+            # For video transcripts, note that content analysis is from full video but only portion will be used
+            if asset['media_type'] == 'video':
+                asset_info += f"Full Video Transcript (NOTE: Only middle portion will be used in final video): {asset['transcript'][:300]}...\n"
+            else:
+                asset_info += f"Content: {asset['transcript'][:200]}...\n"
         media_summary.append(asset_info)
     
     combined_media = "\n---\n".join(media_summary)
     
     prompt = f"""You are an expert multimedia content creator and video editor. Based on the project description and available assets, create a comprehensive content plan focusing on professional video editing and sequencing.
 
+CRITICAL: The videos will be CROPPED to use only the best portions (typically starting 10% into the video and using 90% of content, avoiding boring beginnings/endings). Your voiceover script must match the CROPPED content that will actually appear in the final video, NOT the full original videos.
+
 PROJECT DESCRIPTION:
 {project_description}
 
 TARGET DURATION: {target_duration} seconds
 
-AVAILABLE ASSETS:
+AVAILABLE ASSETS (with cropping information):
 {combined_media}
 
 Create a detailed content plan that focuses on video editing and sequencing. DO NOT generate background music or title images. Focus on:
 1. Professional video editing: cropping, clipping, splitting, and sequencing the available video clips
-2. Voiceover generation (if needed) to narrate the video content
+2. Voiceover generation that matches the CROPPED video segments (not the full original videos)
 3. Timeline structure with optimal pacing and transitions
 4. Professional narrative flow using the available video assets
 
@@ -335,11 +364,11 @@ Return a JSON response with this structure:
     "content_to_generate": [
         {{
             "type": "voiceover",
-            "description": "Detailed description for AI generation",
+            "description": "Detailed description for AI generation - MUST match the cropped video content",
             "duration": 5,
             "placement": "beginning|middle|end",
             "voice_style": "friendly_female|professional_male|etc",
-            "script": "Exact text for voiceovers"
+            "script": "IMPORTANT: Write a complete voiceover script that will take approximately {target_duration} seconds to narrate at normal speaking pace. Focus ONLY on the cropped video segments that will actually be shown (middle portions of videos, not beginnings/endings). Include detailed narration for each CROPPED video segment. The script should be comprehensive enough to cover the entire video duration and match the actual content that viewers will see."
         }}
     ],
     "timeline_structure": [
@@ -348,7 +377,7 @@ Return a JSON response with this structure:
             "asset_name": "existing asset name or 'generated_X'",
             "start_time": 0,
             "end_time": 5,
-            "description": "What happens in this segment",
+            "description": "What happens in this CROPPED segment (not the full video)",
             "editing_notes": "Crop, adjust, overlay instructions",
             "audio_overlay": "background_music|voiceover|none"
         }}
@@ -361,7 +390,14 @@ Return a JSON response with this structure:
     }}
 }}
 
-Focus on creating engaging, professional content that matches the project description and makes optimal use of available assets."""
+Focus on creating engaging, professional content that matches the project description and makes optimal use of available assets.
+
+CRITICAL FOR VOICEOVERS: When generating voiceover content, ensure the script is long enough to cover the full {target_duration} second video AND matches the CROPPED video content (not the full original videos). The videos will be professionally edited to show only the best portions. A typical speaking pace is about 150-180 words per minute, so for {target_duration} seconds, you need approximately {int((target_duration/60) * 160)} words. Include:
+1. Opening introduction (10-15% of script) - introduce what viewers will see in the cropped segments
+2. Detailed narration for each CROPPED video segment (70-80% of script) - describe only what's visible in the edited clips  
+3. Closing summary (10-15% of script) - wrap up the content shown in the edited video
+
+Make sure the voiceover script provides continuous narration that matches the CROPPED video content throughout the entire duration. Do NOT reference content from the beginning or end of videos that will be cut out during professional editing."""
 
     try:
         response = genai_client.models.generate_content(
@@ -914,7 +950,10 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                     # Calculate durations based on AI analysis
                     total_weight = sum(seg.get('importance', 1) * seg.get('recommended_duration', 10) for seg in video_segments)
                     
-                    for video_asset in video_assets[:len(video_segments)]:
+                    # IMPORTANT: Process ALL video assets, not just those with matching segments
+                    st.info(f"🎯 Processing {len(video_assets)} videos with {len(video_segments)} AI-analyzed segments")
+                    
+                    for i, video_asset in enumerate(video_assets[:3]):  # Use all available videos (max 3)
                         # Find matching segment in timeline structure
                         matching_segment = None
                         asset_base_name = video_asset['name'].replace('.mp4', '').replace('.mov', '')
@@ -931,41 +970,37 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                             content_weight = importance * recommended_duration
                             
                             # Allocate duration proportionally
-                            clip_duration = (content_weight / total_weight) * remaining_duration if total_weight > 0 else remaining_duration / len(video_segments)
-                            
-                            # Professional video editing: Ensure within reasonable bounds
-                            source_duration = video_asset.get('duration', 10)
-                            if source_duration <= 0:
-                                source_duration = 10
-                            
-                            # Smart clipping: Use best part of the video (not always from start)
-                            max_usable_duration = source_duration * 0.90  # Use up to 90% of source
-                            clip_duration = min(clip_duration, max_usable_duration)
-                            clip_duration = max(clip_duration, 3)  # Minimum 3s per clip
-                            clip_duration = min(clip_duration, 20)  # Maximum 20s per clip
-                            
-                            # Smart start time selection (avoid very beginning/end)
-                            if source_duration > clip_duration + 2:
-                                # Leave 1s buffer at start and end for better quality
-                                max_start_time = source_duration - clip_duration - 1
-                                start_time = min(1, max_start_time * 0.1)  # Start slightly into the video
-                            else:
-                                start_time = 0
-                            
+                            clip_duration = (content_weight / total_weight) * remaining_duration if total_weight > 0 else remaining_duration / len(video_assets[:3])
+                        else:
+                            # Fallback for videos without matching AI segments: equal distribution
+                            st.info(f"📋 No AI segment found for {video_asset['name']}, using equal distribution")
+                            clip_duration = remaining_duration / len(video_assets[:3])
+                        
+                        # Professional video editing: Ensure within reasonable bounds
+                        source_duration = video_asset.get('duration', 10)
+                        if source_duration <= 0:
+                            source_duration = 10
+                        
+                        # Smart clipping: Use best part of the video (not always from start)
+                        max_usable_duration = source_duration * 0.90  # Use up to 90% of source
+                        clip_duration = min(clip_duration, max_usable_duration)
+                        clip_duration = max(clip_duration, 3)  # Minimum 3s per clip
+                        clip_duration = min(clip_duration, 45)  # Increased maximum per clip for longer videos
+                        
+                        # Smart start time selection (avoid very beginning/end)
+                        if source_duration > clip_duration + 2:
+                            # Leave 1s buffer at start and end for better quality
+                            max_start_time = source_duration - clip_duration - 1
+                            start_time = min(1, max_start_time * 0.1)  # Start slightly into the video
+                        else:
+                            start_time = 0
+                        
+                        if matching_segment:
+                            importance = matching_segment.get('importance', 1)
                             st.info(f"🎯 {video_asset['name']}: {clip_duration:.1f}s (from {start_time:.1f}s, importance: {importance})")
                         else:
-                            # Fallback to equal distribution with smart editing
-                            clip_duration = remaining_duration / len(video_assets[:3])
-                            source_duration = video_asset.get('duration', 10)
-                            clip_duration = min(clip_duration, source_duration * 0.90)
-                            
-                            # Smart start time for fallback
-                            if source_duration > clip_duration + 2:
-                                start_time = min(1, source_duration * 0.1)
-                            else:
-                                start_time = 0
-                                
-                            st.info(f"📹 {video_asset['name']}: {clip_duration:.1f}s (from {start_time:.1f}s, professional edit)")
+                            st.info(f"📹 {video_asset['name']}: {clip_duration:.1f}s (from {start_time:.1f}s, equal distribution)")
+                        st.info(f"🎬 Cropping: Using {start_time:.1f}s-{start_time + clip_duration:.1f}s from {source_duration:.1f}s total video")
                         
                         # Create professionally edited video clip
                         if clip_duration > 0:
@@ -981,6 +1016,8 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                                 timeline_duration += clip_duration
                                 video_added = True
                                 
+                                st.success(f"✅ Added {video_asset['name']} ({clip_duration:.1f}s) to timeline")
+                                
                             except Exception as video_error:
                                 st.error(f"❌ Failed to add {video_asset['name']}: {str(video_error)}")
                                 continue
@@ -995,6 +1032,8 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                 clips_to_use = min(len(video_assets), 3)
                 duration_per_clip = remaining_duration / clips_to_use if clips_to_use > 0 else 0
                 
+                st.info(f"📊 Fallback mode: Distributing {remaining_duration:.1f}s across {clips_to_use} clips ({duration_per_clip:.1f}s each)")
+                
                 for i, video_asset in enumerate(video_assets[:clips_to_use]):
                     # Calculate professional clip duration
                     source_duration = video_asset.get('duration', 10)
@@ -1005,7 +1044,7 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                     max_usable_duration = source_duration * 0.90  # Use up to 90% of source
                     clip_duration = min(duration_per_clip, max_usable_duration)
                     clip_duration = max(clip_duration, 3)  # Minimum 3s per clip
-                    clip_duration = min(clip_duration, 15)  # Maximum 15s per clip for better pacing
+                    clip_duration = min(clip_duration, 45)  # Increased maximum for longer target durations
                     
                     # Professional start time selection (avoid start/end)
                     if source_duration > clip_duration + 2:
@@ -1013,6 +1052,28 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                         start_time = min(1, source_duration * 0.1)
                     else:
                         start_time = 0
+                    
+                    st.info(f"📹 {video_asset['name']}: {clip_duration:.1f}s (from {start_time:.1f}s, fallback edit)")
+                    st.info(f"🎬 Cropping: Using {start_time:.1f}s-{start_time + clip_duration:.1f}s from {source_duration:.1f}s total video")
+                    
+                    # Create and add video clip
+                    if clip_duration > 0:
+                        try:
+                            video_clip = VideoAsset(
+                                asset_id=video_asset['asset_id'],
+                                start=start_time,
+                                end=start_time + clip_duration
+                            )
+                            
+                            timeline.add_inline(video_clip)
+                            timeline_duration += clip_duration
+                            video_added = True
+                            
+                            st.success(f"✅ Added {video_asset['name']} ({clip_duration:.1f}s) to timeline")
+                            
+                        except Exception as video_error:
+                            st.error(f"❌ Failed to add {video_asset['name']}: {str(video_error)}")
+                            continue
                     
                     st.info(f"📹 Professional edit: {video_asset['name']} ({clip_duration:.1f}s from {start_time:.1f}s)")
                     
@@ -1183,19 +1244,25 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                         st.warning(f"⚠️ Audio too short after buffer ({max_safe_audio_duration:.1f}s). Skipping voiceover.")
                         continue
                     
-                    # Choose the minimum duration with safety buffer
+                    # Choose the duration that covers the entire video
+                    # If audio is shorter, we'll use what we have; if longer, we'll trim it
                     audio_duration = min(actual_video_duration, max_safe_audio_duration)
+                    
+                    # IMPORTANT: Ensure audio covers the entire video timeline
+                    if audio_duration < actual_video_duration:
+                        st.info(f"🔍 Audio ({audio_duration:.1f}s) is shorter than video ({actual_video_duration:.1f}s)")
+                        st.info("💡 Voiceover will cover the available duration, then video will continue without narration")
                     
                     # Additional safety checks
                     if audio_duration <= 0:
                         st.warning(f"⚠️ Calculated audio duration is invalid ({audio_duration:.1f}s). Skipping voiceover.")
                         continue
                     
-                    # Final bounds check
+                    # Final bounds check - but prioritize covering more of the video
                     if audio_duration > asset_audio_duration:
-                        audio_duration = asset_audio_duration * 0.95  # Use 95% of available audio
+                        audio_duration = asset_audio_duration * 0.98  # Use 98% of available audio (less aggressive trim)
                     
-                    st.info(f"🎤 Syncing voiceover: {audio_duration:.1f}s audio (with safety buffer) to match {actual_video_duration:.1f}s video")
+                    st.info(f"🎤 Syncing voiceover: {audio_duration:.1f}s audio to cover {actual_video_duration:.1f}s video timeline")
                     
                     audio_asset = AudioAsset(
                         asset_id=asset['asset_id'],
@@ -1204,10 +1271,33 @@ def assemble_multimedia_video(conn, content_plan, media_assets, generated_assets
                         disable_other_tracks=False  # Mix with original video audio
                     )
                     
-                    # Add voiceover starting at beginning
-                    timeline.add_overlay(start=0, asset=audio_asset)
-                    audio_overlays_added += 1
-                    st.info(f"✅ Added voiceover (0-{audio_duration:.1f}s) with safety buffer")
+                    # Add voiceover starting at beginning of timeline (should cover all clips)
+                    try:
+                        timeline.add_overlay(start=0, asset=audio_asset)
+                        audio_overlays_added += 1
+                        st.info(f"✅ Added voiceover overlay (0-{audio_duration:.1f}s) across entire timeline")
+                        
+                        # Debug: Show timeline coverage
+                        coverage_percentage = (audio_duration / actual_video_duration) * 100 if actual_video_duration > 0 else 0
+                        st.info(f"📊 Audio coverage: {coverage_percentage:.1f}% of video timeline")
+                        
+                        if coverage_percentage < 90:
+                            st.warning(f"⚠️ Audio only covers {coverage_percentage:.1f}% of video - some parts may be silent")
+                            st.info("💡 This usually means the voiceover script was too short for the video length")
+                        
+                    except Exception as overlay_error:
+                        st.warning(f"⚠️ add_overlay failed: {str(overlay_error)}")
+                        st.info("🔄 Trying alternative audio integration method...")
+                        
+                        # Alternative method: Try adding as inline audio
+                        try:
+                            timeline.add_inline(audio_asset)
+                            audio_overlays_added += 1
+                            st.info(f"✅ Added voiceover as inline audio (0-{audio_duration:.1f}s)")
+                        except Exception as inline_error:
+                            st.error(f"❌ Both audio methods failed: overlay: {str(overlay_error)}, inline: {str(inline_error)}")
+                            continue
+                    
                     break  # Only add one voiceover to avoid conflicts
                     
                 except Exception as e:
